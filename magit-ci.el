@@ -19,11 +19,12 @@
 ;; DONE filter out response from gcloud so that it removes duplicates and preserves latest
 ;; DONE cache output for multiple branches
 ;; DONE show loading indicator if cache is empty for the branch we switch to
-;; TODO capture the URL of the cloudbuild logs so that the enter keypress takes you to the page
+;; DONE capture the URL of the cloudbuild logs so that the enter keypress takes you to the page
 ;; TODO figure out why we can't go to next section when the builds are inserted from cache
 ;; DONE on re-render respect the previous state of folded/unfolded for section
 ;; DONE render a 'status' indicator to display to the user when there is a fetch happening
 ;; TODO improve how we render the loading indicator
+;; TODO save point when the magit buffer is refreshed so that the cursor doesn't jump back to the top when the async load is finished
 
 (defvar magit-ci-gcloud-project "bloomon-build")
 
@@ -33,10 +34,12 @@
 Prevents the running of multiple update processes concurrently")
 
 (defvar magit-ci-source #'magit-ci-gcloud-source
-  "What to use to fetch ci builds")
+  "What to use to fetch ci builds.")
 
 (defvar magit-ci-extra-branches '("preview" "master")
-  "A sequence of extra branches to watch other than the branch you are currently on.")
+  "A sequence of extra branches to watch other than the branch.
+
+By default magit-ci only watches your currently checked out branch.")
 
 (defface magit-ci-success
     '((((class color) (background light)) :foreground "LawnGreen")
@@ -63,69 +66,80 @@ Prevents the running of multiple update processes concurrently")
   :group 'magit-ci-faces)
 
 (defun magit-ci--status-string (status)
-  (propertize
-   (symbol-name status)
-   'face
-   (pcase status
-     ('success 'magit-ci-success)
-     ('in-progress 'magit-ci-pending)
-     ('failed 'magit-ci-fail)
-     ('unknown 'magit-ci-unknown))))
+  (propertize (symbol-name status) 'face (pcase status
+					   ('success 'magit-ci-success)
+					   ('in-progress 'magit-ci-pending)
+					   ('failed 'magit-ci-fail)
+					   ('unknown 'magit-ci-unknown))))
 
-(defclass ci-timed ()
+(defclass ci-base ()
   ((start-time :initarg :start-time)
    (end-time :initarg :end-time)
    (status :initarg :status)))
 
-(defclass ci-build (ci-timed)
+(defclass ci-build (ci-base)
   ((branch :initarg :branch)
-   (steps :initarg :steps))
+   (steps :initarg :steps)
+   (log-url :initarg :log-url))
   "A datatype capturing a CI run")
 
-(cl-defmethod ci-build-runtime ((obj ci-timed))
+(cl-defmacro dynamic-defvar (name &optional value)
+  (let ((symbol (eval name)))
+    `(defvar ,symbol
+       value)))
+
+(cl-defmethod ci-build-runtime ((obj ci-base))
   "Get the runtime of the ci-build OBJ using :end-time and :start-time."
-  (time-subtract (or (oref obj :end-time) (current-time)) (oref obj :start-time)))
+  (time-subtract (or (slot-value obj :end-time) (current-time)) (slot-value obj :start-time)))
+
+(defun magit-ci--set-section-action (section-name url)
+  (let ((symbol (intern (format "magit-%s-section-map" section-name)))
+	(map (make-sparse-keymap)))
+    (define-key map [remap magit-visit-thing]
+      `(lambda () (interactive) (browse-url ,url)))
+    (eval `(defvar ,symbol map))
+    (set symbol map)))
 
 (cl-defmethod ci-build-render-magit-section ((obj ci-build))
-  (let* ((git-branch (oref obj :branch))
+  "Insert a magit section into the 'current-buffer' for the ci-build OBJ."
+  (let* ((git-branch (slot-value obj :branch))
 	 (section-name (intern (format "%s-build" git-branch)))
+	 (build-url (oref obj log-url))
 	 (build-status-section
 	  (magit-insert-section  ((eval section-name))
 	      (insert (format "%s\t%s\t%s\n"
 			      git-branch
-			      (magit-ci--status-string (oref obj :status))
+			      (magit-ci--status-string (slot-value obj :status))
 			      (format-time-string "%M:%S" (ci-build-runtime obj))))
 	    (magit-insert-heading)
-	    (mapcar #'ci-step-render-magit-section (oref obj :steps)))))
+	    (mapcar #'ci-step-render-magit-section (slot-value obj :steps)))))
 
+    ;; XXX we might need to add the repo name to the section, such that the keymaps
+    ;; arent trampled when multiple magit buffers are open with master and preview
+    ;; sections
+    (magit-ci--set-section-action section-name (oref obj log-url))
     (pcase (magit-section-cached-visibility build-status-section)
       ('show (magit-section-show build-status-section))
-      (t (magit-section-hide build-status-section)))))
+      (_ (magit-section-hide build-status-section)))))
 
 (defun magit-ci--iso-parse-time (time-str)
   "Provide a sane way to parse a TIME-STR into a useable timestamp.
 This timestamp can actually be used by other Emacs time functions."
   (encode-time (decoded-time-set-defaults (parse-time-string time-str))))
 
-(defclass ci-step (ci-timed)
+(defclass ci-step (ci-base)
   ((action :initarg :action))
   "Model the individual step of a CI run")
 
 (cl-defmethod ci-step-render-magit-section ((obj ci-step))
   (let ((curr-pt (point)))
     (magit-insert-section (build-status)
-	(insert (format " └%s " (magit-ci--status-string (oref obj :status))))
+	(insert (format " └%s " (magit-ci--status-string (slot-value obj :status))))
       ;; sometimes start time of steps is not known. If there is no start time we can't
       ;; provide an accurate runtime
-      (when (not (null (oref obj :start-time)))
-        (insert (format-time-string "%M:%S" (ci-build-runtime obj)))
-        (insert " "))
-      (insert (oref obj :action))
-      (insert ?\n))))
-
-(cl-defmethod magit-ci--build-in-progress ((obj ci-build))
-  "Check if a build OBJ is in one of terminal states 'success or 'failed."
-  (not (memq (oref obj :status) '(success failed))))
+      (when (not (null (slot-value obj :start-time)))
+        (insert (format "%s " (format-time-string "%M:%S" (ci-build-runtime obj)))))
+      (insert (format "%s \n" (slot-value obj :action))))))
 
 (defun magit-ci--gcloud-parse-step (step-data)
   (let ((step (ci-step
@@ -158,6 +172,7 @@ This timestamp can actually be used by other Emacs time functions."
                 :branch (gethash "BRANCH_NAME" (gethash "substitutions" item))
                 :status (magit-ci--gcloud-parse-status (gethash "status" item))
                 :steps (mapcar #'magit-ci--gcloud-parse-step (gethash "steps" item))
+		:log-url (gethash "logUrl" item)
                 :start-time nil
                 :end-time nil)))
     (when-let ((start-time (gethash "startTime" item)))
@@ -166,9 +181,6 @@ This timestamp can actually be used by other Emacs time functions."
       (oset build :end-time (magit-ci--iso-parse-time end-time)))
     build))
 
-(defun magit-ci--gcloud-parse (string)
-  (mapcar #'magit-ci--gcloud-parse-build (json-parse-string string)))
-
 (defun magit-ci--render-section (builds)
   "Insert a list of ci-builds BUILDS into as a magit section."
   (let (;; HACK taken from magit-todos. Allows the newly inserted section to be
@@ -176,13 +188,19 @@ This timestamp can actually be used by other Emacs time functions."
 	(magit-insert-section--parent magit-root-section)
 	(inhibit-read-only t))
     (save-excursion
+      (magit-ci--delete-section [* magit-ci-section])
       (goto-char (point-max))
       (magit-insert-section (magit-ci-section)
 	  (magit-insert-heading (if (process-live-p magit-ci--fetch-process)
 				    "CI Builds (*)"
 				  "CI Builds"))
 	(cond
-	  ((not (null builds)) (magit-ci--render-ci-builds builds))
+	  ((not (null builds))
+	   (let ((current-point (point-max))
+		 (align-default-spacing 2))
+	     (insert (propertize "branch\tstatus\truntime\n" 'face 'font-lock-warning-face))
+	     (mapcar #'ci-build-render-magit-section builds)
+	     (align-regexp current-point (point-max) "\\(\\s-*\\)\t" 1 1 t)))
 	  ((and (null builds) (not (null magit-ci--fetch-process)))
 	   (insert "Loading...\n"))
 	  (t (insert "No builds \n")))))))
@@ -222,51 +240,44 @@ See `magit-section-match'.  Also delete it from root section's children."
 		  " AND ")))
     (append base-command `(,project-arg) `("--filter" ,filters))))
 
-
 (defun magit-ci--process-ci-response (response-parser magit-buffer git-branch process)
   (with-current-buffer (process-buffer process)
     (let* ((builds (funcall response-parser (buffer-substring (point-min) (point-max))))
 	   (filtered '())
 	   (branches
 	    (cl-delete-duplicates
-	     (mapcar (lambda (v) (intern (oref v :branch))) builds))))
+	     (mapcar (lambda (v) (intern (slot-value v :branch))) builds)))
+	   (build-in-progress-p
+	    (lambda (build) (not (memq (slot-value build :status) '(success failed))))))
 
       ;; filter out duplicate builds, prefering the latest one.
       ;; XXX potentially extract this into a function so that users can supply their own
       ;; filtering strategy?
       (cl-loop for build in builds
-	    do (if-let ((branch (intern (oref build :branch)))
+	    do (if-let ((branch (intern (slot-value build :branch)))
 			(candidate (plist-get filtered branch)))
-		   (when (time-less-p (oref candidate :start-time) (oref build :start-time))
+		   (when (time-less-p (slot-value candidate :start-time) (slot-value build :start-time))
 		     (setq filtered (plist-put filtered branch build)))
 		 (setq filtered (plist-put filtered branch build))))
-
       (setq builds (mapcar (lambda (branch) (plist-get filtered branch)) branches))
 
       ;; save the items that we're about to render as last result of gcloud build list
       ;; as builds cache is buffer local change the buffer context
       (with-current-buffer magit-buffer
-	(setq magit-ci--builds-cache (push `(,(intern git-branch) . ,builds)
-					   magit-ci--builds-cache))
-	(setq magit-ci--fetch-process nil)
+	(setq
+	 magit-ci--fetch-process nil
+	 magit-ci--builds-cache (push `(,(intern git-branch) . ,builds)
+				      magit-ci--builds-cache))
 	;; if there is a build in progress, schedule the next fetch from the ci source
-	(when (cl-some #'magit-ci--build-in-progress builds)
+	(when (cl-some build-in-progress-p builds)
 	  (funcall magit-ci-source))
 
 	(when (buffer-live-p magit-buffer)
 	  (let ((inhibit-read-only t))
 	    ;; remove any previous section that was there before the async update was
 	    ;; finished
-	    (magit-ci--delete-section [* magit-ci-section])
 	    ;; perform the insert into the magit buffer
 	    (magit-ci--render-section builds)))))))
-
-(defun magit-ci--render-ci-builds (build-statuses)
-  (let ((current-point (point-max))
-	(align-default-spacing 2))
-    (insert (propertize "branch\tstatus\truntime\n" 'face 'font-lock-warning-face))
-    (mapcar #'ci-build-render-magit-section build-statuses)
-    (align-regexp current-point (point-max) "\\(\\s-*\\)\t" 1 1 t)))
 
 (cl-defmacro magit-ci-defsource (name &key command-builder response-parser)
   "Create a CI source by executing the command created by
@@ -280,23 +291,28 @@ RESPONSE-PARSER. Parsed results are rendered into the magit buffer"
 	      #'magit-ci--process-ci-response
 	      ,response-parser (or magit-buffer (current-buffer)) git-branch)))
 
-       ;; if we're not already waiting for the output of an async process. Schedule
-       ;; a fetch, otherwise we wait for output of currently running fetch
-       (when (or (null magit-ci--fetch-process)
-		 (not (process-live-p magit-ci--fetch-process)))
-	 (setq magit-ci--fetch-process
-	       (apply #'async-start-process
-		      (car command) (car command) callback (cdr command))))
+       ;; XXX possibly change this so that the extra branches still get rendered, rather
+       ;; than nothing when a rebase is in progress
+       (when (not (null git-branch))
+	 ;; if we're not already waiting for the output of an async process. Schedule
+	 ;; a fetch, otherwise we wait for output of currently running fetch
+	 (when (or (null magit-ci--fetch-process)
+		   (not (process-live-p magit-ci--fetch-process)))
+	   (setq magit-ci--fetch-process
+		 (apply #'async-start-process
+			(car command) (car command) callback (cdr command))))
 
-       ;; render a cached build while we fetch the update. This makes the update seem a
-       ;; bit more seamless
-       (magit-ci--render-section
-	(alist-get (intern git-branch) magit-ci--builds-cache)))))
+	 ;; render a cached build while we fetch the update. This makes the update seem a
+	 ;; bit more seamless
+	 (magit-ci--render-section
+	  (alist-get (intern git-branch) magit-ci--builds-cache))))))
 
 (magit-ci-defsource
  "gcloud"
  :command-builder #'magit-ci--gcloud-command-builder
- :response-parser #'magit-ci--gcloud-parse)
+ :response-parser #'(lambda (string) (mapcar
+				      #'magit-ci--gcloud-parse-build
+				      (json-parse-string string))))
 
 (setq magit-ci-source #'magit-ci-gcloud-source)
 
