@@ -230,7 +230,7 @@ See `magit-section-match'.  Also delete it from root section's children."
                                (1+ end)))))))
 
 (defun magit-ci--gcloud-command-builder (git-branch)
-  (let ((base-command '("gcloud" "builds" "list" "--format=json"))
+  (let ((base-command '("gcloud" "beta" "builds" "list" "--format=json" "--verbosity=none"))
 	(project-arg (concat "--project=" magit-ci-gcloud-project))
 	(filters (string-join
 		  `(,(concat "substitutions.REPO_NAME~" (projectile-project-name))
