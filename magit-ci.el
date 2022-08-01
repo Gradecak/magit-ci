@@ -38,7 +38,6 @@ Prevents the running of multiple update processes concurrently")
 
 (defvar magit-ci-extra-branches '("preview" "master")
   "A sequence of extra branches to watch other than the branch.
-
 By default magit-ci only watches your currently checked out branch.")
 
 (defface magit-ci-success
@@ -66,11 +65,14 @@ By default magit-ci only watches your currently checked out branch.")
   :group 'magit-ci-faces)
 
 (defun magit-ci--status-string (status)
-  (propertize (symbol-name status) 'face (pcase status
-					   ('success 'magit-ci-success)
-					   ('in-progress 'magit-ci-pending)
-					   ('failed 'magit-ci-fail)
-					   ('unknown 'magit-ci-unknown))))
+  (propertize
+   (symbol-name status)
+   'face
+   (pcase status
+     ('success 'magit-ci-success)
+     ('in-progress 'magit-ci-pending)
+     ('failed 'magit-ci-fail)
+     ('unknown 'magit-ci-unknown))))
 
 (defclass ci-base ()
   ((start-time :initarg :start-time)
@@ -80,47 +82,41 @@ By default magit-ci only watches your currently checked out branch.")
 (defclass ci-build (ci-base)
   ((branch :initarg :branch)
    (steps :initarg :steps)
-   (log-url :initarg :log-url))
+   (log-url :initarg :log-url)
+   (commit-ref :initarg :commit-ref))
   "A datatype capturing a CI run")
-
-(cl-defmacro dynamic-defvar (name &optional value)
-  (let ((symbol (eval name)))
-    `(defvar ,symbol
-       value)))
 
 (cl-defmethod ci-build-runtime ((obj ci-base))
   "Get the runtime of the ci-build OBJ using :end-time and :start-time."
-  (time-subtract (or (slot-value obj :end-time) (current-time)) (slot-value obj :start-time)))
+  (with-slots (end-time start-time) obj
+    (time-subtract (or end-time (current-time)) start-time)))
 
-(defun magit-ci--set-section-action (section-name url)
-  (let ((symbol (intern (format "magit-%s-section-map" section-name)))
-	(map (make-sparse-keymap)))
-    (define-key map [remap magit-visit-thing]
-      `(lambda () (interactive) (browse-url ,url)))
-    (eval `(defvar ,symbol map))
-    (set symbol map)))
+(defvar magit-build-item-section-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [remap magit-visit-thing] #' magit-ci--visit-build)
+    map)
+  "Keymap for build section.")
+
+(cl-defun magit-ci--visit-build (&key (build-url (oref (magit-current-section) value)))
+  (interactive)
+  (browse-url build-url))
 
 (cl-defmethod ci-build-render-magit-section ((obj ci-build))
   "Insert a magit section into the 'current-buffer' for the ci-build OBJ."
-  (let* ((git-branch (slot-value obj :branch))
-	 (section-name (intern (format "%s-build" git-branch)))
-	 (build-url (oref obj log-url))
-	 (build-status-section
-	  (magit-insert-section  ((eval section-name))
-	      (insert (format "%s\t%s\t%s\n"
-			      git-branch
-			      (magit-ci--status-string (slot-value obj :status))
-			      (format-time-string "%M:%S" (ci-build-runtime obj))))
-	    (magit-insert-heading)
-	    (mapcar #'ci-step-render-magit-section (slot-value obj :steps)))))
-
-    ;; XXX we might need to add the repo name to the section, such that the keymaps
-    ;; arent trampled when multiple magit buffers are open with master and preview
-    ;; sections
-    (magit-ci--set-section-action section-name (oref obj log-url))
-    (pcase (magit-section-cached-visibility build-status-section)
-      ('show (magit-section-show build-status-section))
-      (_ (magit-section-hide build-status-section)))))
+  (with-slots (branch status steps commit-ref) obj
+    (let* ((build-url (oref obj log-url))
+	   (build-status-section
+	    (magit-insert-section  (build-item build-url)
+		(insert (format "%s\t%s\t%s\t%s\n"
+				(propertize commit-ref 'face 'magit-hash)
+				branch
+				(magit-ci--status-string status)
+				(format-time-string "%M:%S" (ci-build-runtime obj))))
+	      (magit-insert-heading)
+	      (mapcar #'ci-step-render-magit-section steps))))
+      (pcase (magit-section-cached-visibility build-status-section)
+	('show (magit-section-show build-status-section))
+	(_ (magit-section-hide build-status-section))))))
 
 (defun magit-ci--iso-parse-time (time-str)
   "Provide a sane way to parse a TIME-STR into a useable timestamp.
@@ -133,13 +129,14 @@ This timestamp can actually be used by other Emacs time functions."
 
 (cl-defmethod ci-step-render-magit-section ((obj ci-step))
   (let ((curr-pt (point)))
-    (magit-insert-section (build-status)
-	(insert (format " └%s " (magit-ci--status-string (slot-value obj :status))))
-      ;; sometimes start time of steps is not known. If there is no start time we can't
-      ;; provide an accurate runtime
-      (when (not (null (slot-value obj :start-time)))
-        (insert (format "%s " (format-time-string "%M:%S" (ci-build-runtime obj)))))
-      (insert (format "%s \n" (slot-value obj :action))))))
+    (with-slots (status start-time action) obj
+      (magit-insert-section (build-status )
+	  (insert (format " └%s " (magit-ci--status-string status)))
+	;; sometimes start time of steps is not known. If there is no start time we can't
+	;; provide an accurate runtime
+	(when (not (null start-time))
+          (insert (format "%s " (format-time-string "%M:%S" (ci-build-runtime obj)))))
+	(insert (format "%s \n" action))))))
 
 (defun magit-ci--gcloud-parse-step (step-data)
   (let ((step (ci-step
@@ -168,13 +165,15 @@ This timestamp can actually be used by other Emacs time functions."
     (_ 'unknown)))
 
 (defun magit-ci--gcloud-parse-build (item)
-  (let ((build (ci-build
-                :branch (gethash "BRANCH_NAME" (gethash "substitutions" item))
-                :status (magit-ci--gcloud-parse-status (gethash "status" item))
-                :steps (mapcar #'magit-ci--gcloud-parse-step (gethash "steps" item))
-		:log-url (gethash "logUrl" item)
-                :start-time nil
-                :end-time nil)))
+  (let* ((substitutions (gethash "substitutions" item))
+	 (build (ci-build
+                 :branch (gethash "BRANCH_NAME" substitutions)
+                 :status (magit-ci--gcloud-parse-status (gethash "status" item))
+                 :steps (mapcar #'magit-ci--gcloud-parse-step (gethash "steps" item))
+		 :log-url (gethash "logUrl" item)
+		 :commit-ref (gethash "SHORT_SHA" substitutions)
+                 :start-time nil
+                 :end-time nil)))
     (when-let ((start-time (gethash "startTime" item)))
       (oset build :start-time (magit-ci--iso-parse-time start-time)))
     (when-let ((end-time (gethash "finishTime" item)))
@@ -183,11 +182,11 @@ This timestamp can actually be used by other Emacs time functions."
 
 (defun magit-ci--render-section (builds)
   "Insert a list of ci-builds BUILDS into as a magit section."
-  (let (;; HACK taken from magit-todos. Allows the newly inserted section to be
-	;; collapsable like the other section
-	(magit-insert-section--parent magit-root-section)
-	(inhibit-read-only t))
-    (save-excursion
+  (save-excursion
+    (let (;; HACK taken from magit-todos. Allows the newly inserted section to be
+	  ;; collapsable like the other section
+	  (inhibit-read-only t)
+	  (magit-insert-section--parent magit-root-section))
       (magit-ci--delete-section [* magit-ci-section])
       (goto-char (point-max))
       (magit-insert-section (magit-ci-section)
@@ -198,7 +197,7 @@ This timestamp can actually be used by other Emacs time functions."
 	  ((not (null builds))
 	   (let ((current-point (point-max))
 		 (align-default-spacing 2))
-	     (insert (propertize "branch\tstatus\truntime\n" 'face 'font-lock-warning-face))
+	     (insert (propertize "ref\tbranch\tstatus\truntime\n" 'face 'font-lock-warning-face))
 	     (mapcar #'ci-build-render-magit-section builds)
 	     (align-regexp current-point (point-max) "\\(\\s-*\\)\t" 1 1 t)))
 	  ((and (null builds) (not (null magit-ci--fetch-process)))
@@ -254,11 +253,12 @@ See `magit-section-match'.  Also delete it from root section's children."
       ;; XXX potentially extract this into a function so that users can supply their own
       ;; filtering strategy?
       (cl-loop for build in builds
-	    do (if-let ((branch (intern (slot-value build :branch)))
-			(candidate (plist-get filtered branch)))
-		   (when (time-less-p (slot-value candidate :start-time) (slot-value build :start-time))
-		     (setq filtered (plist-put filtered branch build)))
-		 (setq filtered (plist-put filtered branch build))))
+	    do (with-slots (branch start-time) build
+		 (if-let ((branch (intern branch))
+			  (candidate (plist-get filtered branch)))
+		     (when (time-less-p (slot-value candidate :start-time) start-time)
+		       (setq filtered (plist-put filtered branch build)))
+		   (setq filtered (plist-put filtered branch build)))))
       (setq builds (mapcar (lambda (branch) (plist-get filtered branch)) branches))
 
       ;; save the items that we're about to render as last result of gcloud build list
@@ -273,11 +273,10 @@ See `magit-section-match'.  Also delete it from root section's children."
 	  (funcall magit-ci-source))
 
 	(when (buffer-live-p magit-buffer)
-	  (let ((inhibit-read-only t))
-	    ;; remove any previous section that was there before the async update was
-	    ;; finished
-	    ;; perform the insert into the magit buffer
-	    (magit-ci--render-section builds)))))))
+	  ;; remove any previous section that was there before the async update was
+	  ;; finished
+	  ;; perform the insert into the magit buffer
+	  (magit-ci--render-section builds))))))
 
 (cl-defmacro magit-ci-defsource (name &key command-builder response-parser)
   "Create a CI source by executing the command created by
@@ -314,10 +313,9 @@ RESPONSE-PARSER. Parsed results are rendered into the magit buffer"
 				      #'magit-ci--gcloud-parse-build
 				      (json-parse-string string))))
 
-(setq magit-ci-source #'magit-ci-gcloud-source)
-
+;;;###autoload
 (define-minor-mode magit-ci-mode
-    "foobar."
+    "Add a 'CI-Builds section to the Magit status buffer."
   :require 'magit-ci
   :group 'magit-ci
   :global t
