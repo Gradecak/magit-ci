@@ -2,27 +2,7 @@
 (require 'cl-lib)
 (require 'parse-time)
 
-;; Inline Jira
-;; DONE use async when fetching the build status so that we don't block magit
-;; DONE only display builds for current branch
-;; DONE dynamically configure 'extra branches' to watch. right now hardcoded to 'preview'
-;; DONE cache results so that we can display them while we update in the background
-;; DONE parse the individual steps so that we can see the status in more detail
-;; DONE render individual steps as a subsection to the build step
-;; DONE figure out how to format the output when we have long branch names so that everything aligns
-;; DONE parse the start and end time to calculate time elapsed
-;; DONE save the currently running gcloud process to prevent multiple concurrent gcloud polls
-;; DONE if any state is currently in progress, automatically keep polling until everything is in a terminal state
-;; DONE improve formatting of the CI section in magit buffer
-;; DONE render runtime in human readable format (minutes + seconds)
-;; TODO replace the magit-ci--delete-section function with some sort of an abstraction over (magit-insert-section) macro that first deletes before inserting
-;; DONE filter out response from gcloud so that it removes duplicates and preserves latest
-;; DONE cache output for multiple branches
-;; DONE show loading indicator if cache is empty for the branch we switch to
-;; DONE capture the URL of the cloudbuild logs so that the enter keypress takes you to the page
 ;; TODO figure out why we can't go to next section when the builds are inserted from cache
-;; DONE on re-render respect the previous state of folded/unfolded for section
-;; DONE render a 'status' indicator to display to the user when there is a fetch happening
 ;; TODO improve how we render the loading indicator
 ;; TODO save point when the magit buffer is refreshed so that the cursor doesn't jump back to the top when the async load is finished
 
